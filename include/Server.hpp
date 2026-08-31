@@ -1,0 +1,59 @@
+#ifndef SERVER_HPP
+#define SERVER_HPP
+
+#include <string>
+#include <unordered_map>
+#include <memory>
+#include <mutex>
+#include <atomic>
+
+#include "ClientConnection.hpp"
+#include "ThreadPool.hpp"
+
+#if !defined(_WIN32)
+#include <sys/epoll.h>
+#endif
+
+class Server {
+public:
+    Server(int port, int maxConnections, size_t threadPoolSize, const std::string& logFile = "");
+    ~Server();
+
+    bool init();
+    void run();
+    void stop();
+
+    // Broadcast a text frame to all clients (or excluding a specific sender client ID)
+    void broadcast(const std::string& message, int excludeClientId = -1);
+
+    // Send a message frame to a single client ID
+    void sendToClient(int clientId, const std::string& message);
+
+private:
+    void acceptNewConnection();
+    void handleClientRead(int fd);
+    void disconnectClient(int fd, const std::string& reason);
+    void processClientMessage(int clientId, const std::string& message);
+
+    int setNonBlocking(int fd);
+
+    int m_port;
+    int m_maxConnections;
+    int m_serverFd{-1};
+    int m_epollFd{-1};
+
+    std::atomic<bool> m_running{false};
+    std::atomic<int> m_nextClientId{1};
+
+    ThreadPool m_threadPool;
+    std::string m_logFile;
+
+    std::unordered_map<int, std::shared_ptr<ClientConnection>> m_clientsByFd;
+    std::unordered_map<int, std::shared_ptr<ClientConnection>> m_clientsById;
+    std::mutex m_clientsMutex;
+
+    static const int MAX_EVENTS = 1024;
+    static const size_t READ_BUFFER_SIZE = 4096;
+};
+
+#endif // SERVER_HPP
