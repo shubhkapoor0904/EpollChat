@@ -4,7 +4,7 @@ A production-grade, high-performance **C++17 TCP Chat Server** built for Linux/W
 
 ---
 
-## 🏛️ System Architecture & Threading Model
+## System Architecture & Threading Model
 
 ```
  +-------------------------------------------------------------------------+
@@ -38,7 +38,7 @@ A production-grade, high-performance **C++17 TCP Chat Server** built for Linux/W
 
 ---
 
-## 📦 Binary Protocol Framing Specification
+## Binary Protocol Framing Specification
 
 ```
 +---------------------------+-----------------------------------+
@@ -94,7 +94,7 @@ Available slash commands:
 
 ---
 
-## 📊 Benchmark & Performance Results
+## Benchmark & Performance Results
 
 Load tests were executed using the Python `asyncio` benchmark script (`benchmark/benchmark.py`) under varying levels of concurrent TCP connections on WSL2 (Ubuntu 22.04 LTS, 8-Core Host CPU).
 
@@ -122,7 +122,7 @@ python3 benchmark/benchmark.py --host 127.0.0.1 --port 8080 --clients 1000 --mes
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 d:/EpollChat/
@@ -151,5 +151,5 @@ d:/EpollChat/
 
 ---
 
-## 📄 License
+## License
 MIT License.
