@@ -13,6 +13,8 @@ A high-performance, production-quality multi-threaded TCP chat server implemente
 
 ### 2. POSIX Sockets & Epoll Event Loop (`Server.hpp` / `Server.cpp`)
 - Non-blocking server TCP socket setup (`socket`, `SO_REUSEADDR`, `O_NONBLOCK`, `bind`, `listen`).
+- Configured sockets with `TCP_NODELAY` (`IPPROTO_TCP`) to disable Nagle's algorithm for low latency and `SO_KEEPALIVE` for session health tracking.
+- Replaced global map mutex with `std::shared_mutex` (C++17 reader-writer locks): `std::shared_lock` for read-heavy lookups/broadcasts and `std::unique_lock` for connection state modifications.
 - Edge-triggered epoll event loop (`epoll_create1`, `epoll_ctl`, `epoll_wait`).
 - Decouples network I/O from thread pool worker processing.
 
@@ -22,8 +24,10 @@ A high-performance, production-quality multi-threaded TCP chat server implemente
 
 ### 4. Length-Prefixed Binary Protocol (`Protocol.hpp` / `Protocol.cpp`)
 - 4-byte big-endian `uint32` length header followed by UTF-8 string payload.
+- Added `Protocol::encodeToBuffer` using `std::string_view` for zero-allocation binary frame encoding.
+- Optimized `broadcast()` to encode the binary frame **once** per message broadcast instead of re-encoding for every connected client.
 - Buffer accumulator handles short reads, partial reads, and frame fragmentation.
-- Unit tests implemented in `tests/test_protocol.cpp` covering roundtrip, multi-frame buffers, fragmented packets, and payload limit exceptions.
+- Unit tests implemented in `tests/test_protocol.cpp` covering roundtrip, zero-allocation encoding, multi-frame buffers, fragmented packets, and payload limit exceptions.
 
 ### 5. Client Tracking & Commands (`ClientConnection.hpp` / `ClientConnection.cpp`)
 - Tracks client IDs, file descriptors, IP/port, nicknames, and read buffers.
