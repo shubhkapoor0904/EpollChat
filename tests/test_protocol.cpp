@@ -30,6 +30,19 @@ TEST_CASE("Protocol framing roundtrip", "[Protocol]") {
     REQUIRE(readBuf.empty() == true);
 }
 
+TEST_CASE("Protocol encodeToBuffer test", "[Protocol]") {
+    std::string msg = "Zero Allocation Buffer Encoding Test";
+    std::vector<uint8_t> buffer;
+    Protocol::encodeToBuffer(msg, buffer);
+
+    std::vector<std::string> decodedMsgs;
+    bool success = Protocol::decode(buffer, decodedMsgs);
+
+    REQUIRE(success == true);
+    REQUIRE(decodedMsgs.size() == 1);
+    REQUIRE(decodedMsgs[0] == msg);
+}
+
 TEST_CASE("Multiple frames accumulated in buffer", "[Protocol]") {
     std::string msg1 = "First Message";
     std::string msg2 = "Second Message";

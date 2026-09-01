@@ -9,15 +9,19 @@
 #include <cstring>
 #include <stdexcept>
 
-std::vector<uint8_t> Protocol::encode(const std::string& payload) {
+std::vector<uint8_t> Protocol::encode(std::string_view payload) {
+    std::vector<uint8_t> frame;
+    encodeToBuffer(payload, frame);
+    return frame;
+}
+
+void Protocol::encodeToBuffer(std::string_view payload, std::vector<uint8_t>& outBuffer) {
     uint32_t payloadLen = static_cast<uint32_t>(payload.size());
     uint32_t netLen = htonl(payloadLen);
 
-    std::vector<uint8_t> frame(HEADER_SIZE + payloadLen);
-    std::memcpy(frame.data(), &netLen, HEADER_SIZE);
-    std::memcpy(frame.data() + HEADER_SIZE, payload.data(), payloadLen);
-
-    return frame;
+    outBuffer.resize(HEADER_SIZE + payloadLen);
+    std::memcpy(outBuffer.data(), &netLen, HEADER_SIZE);
+    std::memcpy(outBuffer.data() + HEADER_SIZE, payload.data(), payloadLen);
 }
 
 bool Protocol::decode(std::vector<uint8_t>& buffer, std::vector<std::string>& outMessages) {
