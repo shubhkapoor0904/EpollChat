@@ -2,9 +2,10 @@
 #define SERVER_HPP
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <atomic>
 
 #include "ClientConnection.hpp"
@@ -24,10 +25,10 @@ public:
     void stop();
 
     // Broadcast a text frame to all clients (or excluding a specific sender client ID)
-    void broadcast(const std::string& message, int excludeClientId = -1);
+    void broadcast(std::string_view message, int excludeClientId = -1);
 
     // Send a message frame to a single client ID
-    void sendToClient(int clientId, const std::string& message);
+    void sendToClient(int clientId, std::string_view message);
 
 private:
     void acceptNewConnection();
@@ -50,10 +51,10 @@ private:
 
     std::unordered_map<int, std::shared_ptr<ClientConnection>> m_clientsByFd;
     std::unordered_map<int, std::shared_ptr<ClientConnection>> m_clientsById;
-    std::mutex m_clientsMutex;
+    mutable std::shared_mutex m_clientsMutex;
 
-    static const int MAX_EVENTS = 1024;
-    static const size_t READ_BUFFER_SIZE = 4096;
+    static constexpr int MAX_EVENTS = 1024;
+    static constexpr size_t READ_BUFFER_SIZE = 8192;
 };
 
 #endif // SERVER_HPP

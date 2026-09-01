@@ -157,16 +157,15 @@ void Server::acceptNewConnection() {
 
         if (clientFd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // All incoming connections accepted
                 break;
             }
             Logger::getInstance().error("Accept failed: " + std::string(strerror(errno)));
             break;
         }
 
-        // Check connection limit
+        // Check connection limit with shared read lock first
         {
-            std::lock_guard<std::mutex> lock(m_clientsMutex);
+            std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
             if (static_cast<int>(m_clientsByFd.size()) >= m_maxConnections) {
                 Logger::getInstance().warn("Max connection threshold reached. Rejecting connection.");
                 close(clientFd);
@@ -203,7 +202,7 @@ void Server::acceptNewConnection() {
         auto client = std::make_shared<ClientConnection>(clientId, clientFd, ipStr, clientPort);
 
         {
-            std::lock_guard<std::mutex> lock(m_clientsMutex);
+            std::unique_lock<std::shared_mutex> lock(m_clientsMutex);
             m_clientsByFd[clientFd] = client;
             m_clientsById[clientId] = client;
         }
@@ -222,7 +221,7 @@ void Server::acceptNewConnection() {
 void Server::handleClientRead(int fd) {
     std::shared_ptr<ClientConnection> client;
     {
-        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
         auto it = m_clientsByFd.find(fd);
         if (it == m_clientsByFd.end()) return;
         client = it->second;
@@ -238,15 +237,12 @@ void Server::handleClientRead(int fd) {
             auto& readBuf = client->getReadBuffer();
             readBuf.insert(readBuf.end(), buffer, buffer + bytesRead);
         } else if (bytesRead == 0) {
-            // Peer closed TCP connection gracefully
             socketClosed = true;
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // All data read from kernel socket buffer
                 break;
             } else {
-                // Socket error
                 socketClosed = true;
                 break;
             }
@@ -262,7 +258,6 @@ void Server::handleClientRead(int fd) {
     std::vector<std::string> messages;
     try {
         if (Protocol::decode(client->getReadBuffer(), messages)) {
-            // For each complete frame decoded, dispatch task to thread pool for work decoupling
             for (const auto& msg : messages) {
                 int clientId = client->getId();
                 m_threadPool.enqueue([this, clientId, msg]() {
@@ -279,7 +274,7 @@ void Server::handleClientRead(int fd) {
 void Server::processClientMessage(int clientId, const std::string& message) {
     std::shared_ptr<ClientConnection> client;
     {
-        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
         auto it = m_clientsById.find(clientId);
         if (it == m_clientsById.end()) return;
         client = it->second;
@@ -307,13 +302,15 @@ void Server::processClientMessage(int clientId, const std::string& message) {
             }
         } else if (cmd == "/list") {
             std::stringstream listSs;
-            std::lock_guard<std::mutex> lock(m_clientsMutex);
-            listSs << "[SERVER] Connected users (" << m_clientsById.size() << "): ";
-            bool first = true;
-            for (const auto& pair : m_clientsById) {
-                if (!first) listSs << ", ";
-                listSs << pair.second->getNickname() << " (#" << pair.first << ")";
-                first = false;
+            {
+                std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
+                listSs << "[SERVER] Connected users (" << m_clientsById.size() << "): ";
+                bool first = true;
+                for (const auto& pair : m_clientsById) {
+                    if (!first) listSs << ", ";
+                    listSs << pair.second->getNickname() << " (#" << pair.first << ")";
+                    first = false;
+                }
             }
             client->sendFrame(listSs.str());
         } else if (cmd == "/quit") {
@@ -332,7 +329,7 @@ void Server::processClientMessage(int clientId, const std::string& message) {
 void Server::disconnectClient(int fd, const std::string& reason) {
     std::shared_ptr<ClientConnection> client;
     {
-        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        std::unique_lock<std::shared_mutex> lock(m_clientsMutex);
         auto it = m_clientsByFd.find(fd);
         if (it == m_clientsByFd.end()) return;
         client = it->second;
@@ -351,27 +348,33 @@ void Server::disconnectClient(int fd, const std::string& reason) {
     broadcast("[SERVER] " + client->getNickname() + " left the chat.");
 }
 
-void Server::broadcast(const std::string& message, int excludeClientId) {
-    std::vector<std::shared_ptr<ClientConnection>> clients;
+void Server::broadcast(std::string_view message, int excludeClientId) {
+    // 1. Pre-encode binary frame ONCE for all recipients (eliminates redundant encoding allocations)
+    std::vector<uint8_t> encodedFrame;
+    Protocol::encodeToBuffer(message, encodedFrame);
+
+    // 2. Acquire shared read lock to gather active client targets
+    std::vector<std::shared_ptr<ClientConnection>> recipients;
     {
-        std::lock_guard<std::mutex> lock(m_clientsMutex);
-        clients.reserve(m_clientsById.size());
-        for (const auto& pair : m_clientsById) {
-            if (pair.first != excludeClientId) {
-                clients.push_back(pair.second);
+        std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
+        recipients.reserve(m_clientsById.size());
+        for (const auto& [id, client] : m_clientsById) {
+            if (id != excludeClientId) {
+                recipients.push_back(client);
             }
         }
     }
 
-    for (const auto& client : clients) {
-        client->sendFrame(message);
+    // 3. Dispatch pre-encoded frame to clients
+    for (const auto& client : recipients) {
+        client->sendPreencodedFrame(encodedFrame);
     }
 }
 
-void Server::sendToClient(int clientId, const std::string& message) {
+void Server::sendToClient(int clientId, std::string_view message) {
     std::shared_ptr<ClientConnection> client;
     {
-        std::lock_guard<std::mutex> lock(m_clientsMutex);
+        std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
         auto it = m_clientsById.find(clientId);
         if (it != m_clientsById.end()) {
             client = it->second;
@@ -388,7 +391,7 @@ void Server::stop() {
         Logger::getInstance().info("Shutting down server...");
 
         {
-            std::lock_guard<std::mutex> lock(m_clientsMutex);
+            std::unique_lock<std::shared_mutex> lock(m_clientsMutex);
             for (const auto& pair : m_clientsByFd) {
 #if !defined(_WIN32)
                 if (m_epollFd >= 0) {
