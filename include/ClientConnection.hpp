@@ -22,8 +22,10 @@ public:
     std::vector<uint8_t>& getReadBuffer() { return m_readBuffer; }
 
     // Thread-safe send of encoded binary frame directly to socket fd
+    bool sendRawBytes(const uint8_t* data, size_t size);
     bool sendRawBytes(const std::vector<uint8_t>& data);
-    bool sendFrame(const std::string& textMessage);
+    bool sendFrame(std::string_view textMessage);
+    bool sendPreencodedFrame(const std::vector<uint8_t>& encodedFrame);
 
 private:
     int m_id;
