@@ -17,7 +17,35 @@
 #include <unistd.h>
 #endif
 
+namespace Color {
+    constexpr const char* RESET   = "\033[0m";
+    constexpr const char* BOLD    = "\033[1m";
+    constexpr const char* CYAN    = "\033[36m";  // Server msgs & notices
+    constexpr const char* GREEN   = "\033[32m";  // Regular chat
+    constexpr const char* MAGENTA = "\033[35m";  // Private Messages (DMs)
+    constexpr const char* YELLOW  = "\033[33m";  // Channel / Join / Leave alerts
+    constexpr const char* RED     = "\033[31m";  // Errors & Warnings
+}
+
 std::atomic<bool> g_running{true};
+
+void printColorizedMessage(const std::string& msg) {
+    std::cout << "\r\033[K"; // Clear current prompt line
+    if (msg.rfind("[SERVER]", 0) == 0) {
+        if (msg.find("Rate limit") != std::string::npos || msg.find("not found") != std::string::npos || msg.find("Unknown command") != std::string::npos) {
+            std::cout << Color::RED << msg << Color::RESET << "\n";
+        } else if (msg.find("joined") != std::string::npos || msg.find("left") != std::string::npos) {
+            std::cout << Color::YELLOW << msg << Color::RESET << "\n";
+        } else {
+            std::cout << Color::CYAN << msg << Color::RESET << "\n";
+        }
+    } else if (msg.rfind("[PM from", 0) == 0 || msg.rfind("[PM to", 0) == 0) {
+        std::cout << Color::MAGENTA << Color::BOLD << msg << Color::RESET << "\n";
+    } else {
+        std::cout << Color::GREEN << msg << Color::RESET << "\n";
+    }
+    std::cout << Color::BOLD << "> " << Color::RESET << std::flush;
+}
 
 void receiveThreadFunc(int socketFd) {
     std::vector<uint8_t> readBuf;
@@ -30,16 +58,16 @@ void receiveThreadFunc(int socketFd) {
             std::vector<std::string> messages;
             if (Protocol::decode(readBuf, messages)) {
                 for (const auto& msg : messages) {
-                    std::cout << "\n" << msg << "\n> " << std::flush;
+                    printColorizedMessage(msg);
                 }
             }
         } else if (bytesRead == 0) {
-            std::cout << "\n[CLIENT] Server closed connection." << std::endl;
+            std::cout << "\n" << Color::RED << "[CLIENT] Server closed connection." << Color::RESET << std::endl;
             g_running = false;
             break;
         } else {
             if (g_running) {
-                std::cout << "\n[CLIENT] Connection error." << std::endl;
+                std::cout << "\n" << Color::RED << "[CLIENT] Connection error." << Color::RESET << std::endl;
                 g_running = false;
             }
             break;
@@ -71,19 +99,23 @@ int main(int argc, char* argv[]) {
     servAddr.sin_port = htons(static_cast<uint16_t>(port));
     inet_pton(AF_INET, host.c_str(), &servAddr.sin_addr);
 
-    std::cout << "Connecting to chat server at " << host << ":" << port << "..." << std::endl;
+    std::cout << Color::CYAN << "Connecting to Epoll TCP Chat Server at " << host << ":" << port << "..." << Color::RESET << std::endl;
     if (connect(sockFd, reinterpret_cast<struct sockaddr*>(&servAddr), sizeof(servAddr)) < 0) {
-        std::cerr << "Connection failed!" << std::endl;
+        std::cerr << Color::RED << "Connection failed!" << Color::RESET << std::endl;
         return 1;
     }
 
-    std::cout << "Connected! Type your message or /nick, /list, /quit." << std::endl;
+    std::cout << Color::CYAN << "Connected! Type /help for commands or type to chat." << Color::RESET << std::endl;
+    std::cout << Color::BOLD << "> " << Color::RESET << std::flush;
 
     std::thread rxThread(receiveThreadFunc, sockFd);
 
     std::string input;
     while (g_running && std::getline(std::cin, input)) {
-        if (input.empty()) continue;
+        if (input.empty()) {
+            std::cout << Color::BOLD << "> " << Color::RESET << std::flush;
+            continue;
+        }
 
         std::vector<uint8_t> frame = Protocol::encode(input);
         send(sockFd, reinterpret_cast<const char*>(frame.data()), frame.size(), 0);
@@ -92,7 +124,6 @@ int main(int argc, char* argv[]) {
             g_running = false;
             break;
         }
-        std::cout << "> " << std::flush;
     }
 
     g_running = false;
@@ -107,6 +138,7 @@ int main(int argc, char* argv[]) {
         rxThread.join();
     }
 
-    std::cout << "Exited chat client." << std::endl;
+    std::cout << Color::YELLOW << "Exited chat client." << Color::RESET << std::endl;
     return 0;
 }
+
