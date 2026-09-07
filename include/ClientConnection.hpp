@@ -5,6 +5,8 @@
 #include <vector>
 #include <mutex>
 #include <cstdint>
+#include <chrono>
+#include <string_view>
 
 class ClientConnection {
 public:
@@ -18,6 +20,15 @@ public:
 
     std::string getNickname() const;
     void setNickname(const std::string& nick);
+
+    std::string getChannel() const;
+    void setChannel(const std::string& channel);
+
+    // Token-bucket rate limiter (returns true if allowed, false if rate limited)
+    bool checkRateLimit();
+
+    void updateActivity();
+    std::chrono::steady_clock::time_point getLastActivity() const;
 
     std::vector<uint8_t>& getReadBuffer() { return m_readBuffer; }
 
@@ -33,11 +44,22 @@ private:
     std::string m_ipAddress;
     int m_port;
     std::string m_nickname;
+    std::string m_channel{"#general"};
 
     mutable std::mutex m_nickMutex;
+    mutable std::mutex m_channelMutex;
     mutable std::mutex m_sendMutex;
+    mutable std::mutex m_rateMutex;
+
+    // Rate Limiter
+    double m_tokens{10.0};
+    static constexpr double MAX_TOKENS = 10.0;
+    static constexpr double REFILL_RATE_PER_SEC = 5.0; // 5 tokens per second
+    std::chrono::steady_clock::time_point m_lastRefill;
+    std::chrono::steady_clock::time_point m_lastActivity;
 
     std::vector<uint8_t> m_readBuffer;
 };
 
 #endif // CLIENTCONNECTION_HPP
+
