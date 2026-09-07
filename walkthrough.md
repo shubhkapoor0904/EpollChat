@@ -29,14 +29,21 @@ A high-performance, production-quality multi-threaded TCP chat server implemente
 - Buffer accumulator handles short reads, partial reads, and frame fragmentation.
 - Unit tests implemented in `tests/test_protocol.cpp` covering roundtrip, zero-allocation encoding, multi-frame buffers, fragmented packets, and payload limit exceptions.
 
-### 5. Client Tracking & Commands (`ClientConnection.hpp` / `ClientConnection.cpp`)
-- Tracks client IDs, file descriptors, IP/port, nicknames, and read buffers.
-- Thread-safe socket writes with `m_sendMutex`.
-- Supports `/nick <name>`, `/list`, `/quit`, and graceful TCP disconnect handling.
+### 5. Client Tracking, Multi-Channel Architecture & Rate Limiter (`ClientConnection.hpp` / `Server.cpp`)
+- **Dynamic Multi-Channel Support**: Scope broadcasts to active channels (`#general`, `#tech`, `#random`). Supports `/join <#channel>`, `/leave`, and `/rooms` with channel membership tracking.
+- **In-Memory Channel History**: Stores ring buffer of last 15 messages per channel (`m_channelHistory`), delivering instant scrollback when joining a channel.
+- **Private Messaging (Whisper)**: Direct user-to-user messaging via `/msg <target> <message>` or `/w` by nickname or client ID.
+- **Token-Bucket Rate Limiter**: Enforces max 10 token burst capacity with 5 tokens/sec refill rate per client socket to prevent flood/spam attacks.
+- **Interactive Commands & Diagnostics**: Added `/ping` server health check and interactive `/help` menu.
 
-### 6. Benchmark Suite & Documentation (`benchmark/benchmark.py` & `README.md`)
+### 6. Colorized Interactive CLI Client (`client/cli_client.cpp`)
+- Enhanced client UI with ANSI color codes (`CYAN` for server notices, `GREEN` for chat messages, `MAGENTA` for private DMs, `YELLOW` for channel notifications, `RED` for warnings).
+- Smooth prompt clearing and prompt line restoration (`> `).
+
+### 7. Benchmark Suite & Documentation (`benchmark/benchmark.py` & `README.md`)
 - Python 3 `asyncio` load tester spawning $N$ concurrent clients and measuring throughput and latency.
-- Comprehensive `README.md` containing ASCII architecture diagram, build/run commands, binary framing layout, and a benchmark results table for 100, 500, and 1000 concurrent client connections.
+- Comprehensive `README.md` containing ASCII architecture diagram, build/run commands, binary framing layout, and benchmark results table for 100, 500, and 1000 concurrent client connections.
+
 
 ---
 
