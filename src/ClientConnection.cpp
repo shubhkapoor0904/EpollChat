@@ -1,3 +1,6 @@
+#include <netinet/in.h>
+#include <netinet/tcp.h>#include <netinet/tcp.h>
+#include <netinet/in.h>
 #include "ClientConnection.hpp"
 #include "Protocol.hpp"
 
@@ -12,11 +15,14 @@
 
 #if !defined(_WIN32)
 #include <netinet/tcp.h>
+#include <netinet/in.h>
 #endif
 
 ClientConnection::ClientConnection(int id, int fd, const std::string& ipAddress, int port)
     : m_id(id), m_fd(fd), m_ipAddress(ipAddress), m_port(port) {
     m_nickname = "User_" + std::to_string(id);
+    m_lastRefill = std::chrono::steady_clock::now();
+    m_lastActivity = std::chrono::steady_clock::now();
 
     // Disable Nagle's algorithm for low-latency message delivery
     int flag = 1;
@@ -44,6 +50,43 @@ void ClientConnection::setNickname(const std::string& nick) {
     std::lock_guard<std::mutex> lock(m_nickMutex);
     m_nickname = nick;
 }
+
+std::string ClientConnection::getChannel() const {
+    std::lock_guard<std::mutex> lock(m_channelMutex);
+    return m_channel;
+}
+
+void ClientConnection::setChannel(const std::string& channel) {
+    std::lock_guard<std::mutex> lock(m_channelMutex);
+    m_channel = channel;
+}
+
+bool ClientConnection::checkRateLimit() {
+    std::lock_guard<std::mutex> lock(m_rateMutex);
+    auto now = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsed = now - m_lastRefill;
+    m_lastRefill = now;
+
+    m_tokens = std::min(MAX_TOKENS, m_tokens + elapsed.count() * REFILL_RATE_PER_SEC);
+
+    if (m_tokens >= 1.0) {
+        m_tokens -= 1.0;
+        m_lastActivity = now;
+        return true;
+    }
+    return false;
+}
+
+void ClientConnection::updateActivity() {
+    std::lock_guard<std::mutex> lock(m_rateMutex);
+    m_lastActivity = std::chrono::steady_clock::now();
+}
+
+std::chrono::steady_clock::time_point ClientConnection::getLastActivity() const {
+    std::lock_guard<std::mutex> lock(m_rateMutex);
+    return m_lastActivity;
+}
+
 
 bool ClientConnection::sendRawBytes(const uint8_t* data, size_t size) {
     std::lock_guard<std::mutex> lock(m_sendMutex);
@@ -80,3 +123,5 @@ bool ClientConnection::sendFrame(std::string_view textMessage) {
     Protocol::encodeToBuffer(textMessage, frame);
     return sendRawBytes(frame.data(), frame.size());
 }
+
+
