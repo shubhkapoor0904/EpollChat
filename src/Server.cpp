@@ -210,11 +210,17 @@ void Server::acceptNewConnection() {
         Logger::getInstance().info("New client connected from " + std::string(ipStr) + ":" + std::to_string(clientPort), clientId);
 
         // Send welcome banner
-        std::string welcomeMsg = "[SERVER] Welcome! Your ID is " + std::to_string(clientId) + ". Default nick: " + client->getNickname() + ". Use /nick <name>, /list, /quit.";
+        std::string welcomeMsg = "[SERVER] Welcome! Your ID is " + std::to_string(clientId) +
+                                 ". Default nick: " + client->getNickname() +
+                                 ". Channel: " + client->getChannel() +
+                                 ". Type /help for commands.";
         client->sendFrame(welcomeMsg);
 
-        // Notify other clients
-        broadcast("[SERVER] " + client->getNickname() + " joined the chat.", clientId);
+        // Notify other clients in channel
+        broadcastToChannel(client->getChannel(), "[SERVER] " + client->getNickname() + " joined the chat.", clientId);
+
+        // Send channel history
+        sendChannelHistory(clientId, client->getChannel());
     }
 }
 
@@ -271,6 +277,80 @@ void Server::handleClientRead(int fd) {
     }
 }
 
+void Server::storeChannelHistory(const std::string& channel, const std::string& message) {
+    std::lock_guard<std::mutex> lock(m_historyMutex);
+    auto& history = m_channelHistory[channel];
+    history.push_back(message);
+    if (history.size() > MAX_HISTORY_PER_CHANNEL) {
+        history.erase(history.begin());
+    }
+}
+
+void Server::sendChannelHistory(int clientId, const std::string& channel) {
+    std::vector<std::string> historyCopy;
+    {
+        std::lock_guard<std::mutex> lock(m_historyMutex);
+        auto it = m_channelHistory.find(channel);
+        if (it != m_channelHistory.end()) {
+            historyCopy = it->second;
+        }
+    }
+
+    if (!historyCopy.empty()) {
+        sendToClient(clientId, "[SERVER] --- Recent Scrollback History for " + channel + " ---");
+        for (const auto& msg : historyCopy) {
+            sendToClient(clientId, msg);
+        }
+        sendToClient(clientId, "[SERVER] --- End History ---");
+    }
+}
+
+bool Server::sendPrivateMessage(int senderId, std::string_view targetNickOrId, std::string_view message) {
+    std::shared_ptr<ClientConnection> sender;
+    std::shared_ptr<ClientConnection> target;
+
+    std::string targetStr(targetNickOrId);
+    if (!targetStr.empty() && targetStr[0] == '#') {
+        targetStr = targetStr.substr(1);
+    }
+
+    {
+        std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
+        auto sIt = m_clientsById.find(senderId);
+        if (sIt != m_clientsById.end()) {
+            sender = sIt->second;
+        }
+
+        // Try lookup by ID first if numeric
+        try {
+            int targetId = std::stoi(targetStr);
+            auto tIt = m_clientsById.find(targetId);
+            if (tIt != m_clientsById.end()) {
+                target = tIt->second;
+            }
+        } catch (...) {}
+
+        // Otherwise lookup by nickname
+        if (!target) {
+            for (const auto& pair : m_clientsById) {
+                if (pair.second->getNickname() == targetStr) {
+                    target = pair.second;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!sender || !target) return false;
+
+    std::string pmForTarget = "[PM from " + sender->getNickname() + "]: " + std::string(message);
+    std::string pmForSender = "[PM to " + target->getNickname() + "]: " + std::string(message);
+
+    target->sendFrame(pmForTarget);
+    sender->sendFrame(pmForSender);
+    return true;
+}
+
 void Server::processClientMessage(int clientId, const std::string& message) {
     std::shared_ptr<ClientConnection> client;
     {
@@ -278,6 +358,13 @@ void Server::processClientMessage(int clientId, const std::string& message) {
         auto it = m_clientsById.find(clientId);
         if (it == m_clientsById.end()) return;
         client = it->second;
+    }
+
+    // Rate limiting check
+    if (!client->checkRateLimit()) {
+        client->sendFrame("[SERVER] Rate limit exceeded (Max 10 burst / 5 refill per sec). Please slow down.");
+        Logger::getInstance().warn("Client rate limit exceeded", clientId);
+        return;
     }
 
     Logger::getInstance().info("Received message: \"" + message + "\"", clientId);
@@ -296,33 +383,117 @@ void Server::processClientMessage(int clientId, const std::string& message) {
                 client->setNickname(newNick);
                 std::string sysMsg = "[SERVER] " + oldNick + " changed nickname to " + newNick;
                 Logger::getInstance().info(sysMsg, clientId);
-                broadcast(sysMsg);
+                broadcastToChannel(client->getChannel(), sysMsg);
             } else {
                 client->sendFrame("[SERVER] Usage: /nick <new_name>");
             }
-        } else if (cmd == "/list") {
-            std::stringstream listSs;
+        } else if (cmd == "/msg" || cmd == "/w" || cmd == "/dm") {
+            std::string target;
+            ss >> target;
+            std::string pmBody;
+            std::getline(ss, pmBody);
+            // Trim leading space in pmBody
+            size_t firstNonSpace = pmBody.find_first_not_of(" \t");
+            if (firstNonSpace != std::string::npos) {
+                pmBody = pmBody.substr(firstNonSpace);
+            }
+
+            if (!target.empty() && !pmBody.empty()) {
+                if (!sendPrivateMessage(clientId, target, pmBody)) {
+                    client->sendFrame("[SERVER] User '" + target + "' not found.");
+                }
+            } else {
+                client->sendFrame("[SERVER] Usage: /msg <nickname|id> <message>");
+            }
+        } else if (cmd == "/join") {
+            std::string channel;
+            ss >> channel;
+            if (!channel.empty()) {
+                if (channel[0] != '#') {
+                    channel = "#" + channel;
+                }
+                std::string oldChannel = client->getChannel();
+                if (oldChannel != channel) {
+                    broadcastToChannel(oldChannel, "[SERVER] " + client->getNickname() + " left channel " + oldChannel);
+                    client->setChannel(channel);
+                    broadcastToChannel(channel, "[SERVER] " + client->getNickname() + " joined channel " + channel);
+                    sendChannelHistory(clientId, channel);
+                    Logger::getInstance().info(client->getNickname() + " switched to channel " + channel, clientId);
+                } else {
+                    client->sendFrame("[SERVER] You are already in channel " + channel);
+                }
+            } else {
+                client->sendFrame("[SERVER] Usage: /join <#channel>");
+            }
+        } else if (cmd == "/leave") {
+            std::string oldChannel = client->getChannel();
+            if (oldChannel != "#general") {
+                broadcastToChannel(oldChannel, "[SERVER] " + client->getNickname() + " left channel " + oldChannel);
+                client->setChannel("#general");
+                broadcastToChannel("#general", "[SERVER] " + client->getNickname() + " joined channel #general");
+                sendChannelHistory(clientId, "#general");
+            } else {
+                client->sendFrame("[SERVER] You are already in default channel #general");
+            }
+        } else if (cmd == "/rooms") {
+            std::unordered_map<std::string, size_t> roomCounts;
             {
                 std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
-                listSs << "[SERVER] Connected users (" << m_clientsById.size() << "): ";
+                for (const auto& pair : m_clientsById) {
+                    roomCounts[pair.second->getChannel()]++;
+                }
+            }
+            std::stringstream roomsSs;
+            roomsSs << "[SERVER] Active Channels (" << roomCounts.size() << "): ";
+            bool first = true;
+            for (const auto& [room, count] : roomCounts) {
+                if (!first) roomsSs << ", ";
+                roomsSs << room << " (" << count << " users)";
+                first = false;
+            }
+            client->sendFrame(roomsSs.str());
+        } else if (cmd == "/list") {
+            std::stringstream listSs;
+            std::string currentChan = client->getChannel();
+            {
+                std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
+                listSs << "[SERVER] Users in " << currentChan << ": ";
                 bool first = true;
                 for (const auto& pair : m_clientsById) {
-                    if (!first) listSs << ", ";
-                    listSs << pair.second->getNickname() << " (#" << pair.first << ")";
-                    first = false;
+                    if (pair.second->getChannel() == currentChan) {
+                        if (!first) listSs << ", ";
+                        listSs << pair.second->getNickname() << " (#" << pair.first << ")";
+                        first = false;
+                    }
                 }
             }
             client->sendFrame(listSs.str());
+        } else if (cmd == "/ping") {
+            client->sendFrame("[SERVER] Pong! (Server active, port " + std::to_string(m_port) + ")");
+        } else if (cmd == "/help") {
+            std::string helpText =
+                "[SERVER] Available Commands:\n"
+                "  /nick <name>              - Change nickname\n"
+                "  /msg <user|id> <message>  - Send direct private message\n"
+                "  /join <#channel>          - Switch/Join room (e.g. /join #tech)\n"
+                "  /leave                    - Return to #general channel\n"
+                "  /rooms                    - List active channels and user counts\n"
+                "  /list                     - List users in your current channel\n"
+                "  /ping                     - Check server ping\n"
+                "  /help                     - Display this command menu\n"
+                "  /quit                     - Disconnect from server";
+            client->sendFrame(helpText);
         } else if (cmd == "/quit") {
             client->sendFrame("[SERVER] Goodbye!");
             disconnectClient(client->getFd(), "User issued /quit");
         } else {
-            client->sendFrame("[SERVER] Unknown command: " + cmd + ". Available: /nick, /list, /quit");
+            client->sendFrame("[SERVER] Unknown command: " + cmd + ". Type /help for available commands.");
         }
     } else {
-        // Normal chat broadcast
-        std::string formattedMsg = "[" + client->getNickname() + "]: " + message;
-        broadcast(formattedMsg, clientId);
+        // Normal chat broadcast scoped to client's channel
+        std::string channel = client->getChannel();
+        std::string formattedMsg = "[" + channel + "][" + client->getNickname() + "]: " + message;
+        broadcastToChannel(channel, formattedMsg, clientId);
     }
 }
 
@@ -345,11 +516,37 @@ void Server::disconnectClient(int fd, const std::string& reason) {
 #endif
 
     Logger::getInstance().info("Client disconnected (" + reason + ")", client->getId());
-    broadcast("[SERVER] " + client->getNickname() + " left the chat.");
+    broadcastToChannel(client->getChannel(), "[SERVER] " + client->getNickname() + " left the chat.");
+}
+
+void Server::broadcastToChannel(std::string_view channel, std::string_view message, int excludeClientId) {
+    // 1. Store message in channel history ring buffer
+    storeChannelHistory(std::string(channel), std::string(message));
+
+    // 2. Pre-encode binary frame ONCE for all recipients
+    std::vector<uint8_t> encodedFrame;
+    Protocol::encodeToBuffer(message, encodedFrame);
+
+    // 3. Acquire shared read lock to gather channel targets
+    std::vector<std::shared_ptr<ClientConnection>> recipients;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_clientsMutex);
+        recipients.reserve(m_clientsById.size());
+        for (const auto& [id, client] : m_clientsById) {
+            if (id != excludeClientId && client->getChannel() == channel) {
+                recipients.push_back(client);
+            }
+        }
+    }
+
+    // 4. Dispatch pre-encoded frame
+    for (const auto& client : recipients) {
+        client->sendPreencodedFrame(encodedFrame);
+    }
 }
 
 void Server::broadcast(std::string_view message, int excludeClientId) {
-    // 1. Pre-encode binary frame ONCE for all recipients (eliminates redundant encoding allocations)
+    // 1. Pre-encode binary frame ONCE for all recipients
     std::vector<uint8_t> encodedFrame;
     Protocol::encodeToBuffer(message, encodedFrame);
 
@@ -384,6 +581,7 @@ void Server::sendToClient(int clientId, std::string_view message) {
         client->sendFrame(message);
     }
 }
+
 
 void Server::stop() {
     bool expected = true;
